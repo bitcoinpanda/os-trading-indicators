@@ -16,6 +16,18 @@ Indicateurs Pine Script (TradingView) développés par **OS Trading** pour le tr
 
 Le mode d'emploi complet de chaque indicateur est dans son dossier.
 
+## 🇬🇧 English
+
+TradingView (Pine Script) indicators by **OS Trading** for intraday trading: ICT / Smart Money Concepts, TheStrat, price action.
+
+| Indicator | Description | Tested on | Guide |
+|---|---|---|---|
+| CC Model PRO | TheStrat CC model + ICT BOS/CHoCH bias filter + entry, SL, TP and lot size on chart | NAS100, XAUUSD | [English guide](./indicators/cc-model-pro/README.en.md) |
+
+**Install**: open the indicator folder → `.pine` file → **Copy raw file** → TradingView **Pine Editor** → **Open** → **New indicator** → paste → **Save** → **Add to chart**.
+
+The indicators' interface is in French; each English guide gives the French label for every setting.
+
 ## Avertissement
 
 Outils d'aide à la décision, pas des conseils en investissement. Teste en bar replay ou en démo avant de trader réel.

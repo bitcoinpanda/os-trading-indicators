@@ -1,5 +1,7 @@
 # CC Model PRO · TheStrat Candle Confirmation
 
+🇬🇧 [English version](./README.en.md)
+
 Indicateur TradingView (Pine Script v6) qui détecte le modèle **CC (Candle Confirmation) de TheStrat**, le filtre avec un **biais de structure ICT (BOS/CHoCH)** et affiche directement l'exécution : entrée, stop, TP1, TP2 et taille de lot.
 
 > Concept : modèle CC de TheStrat, tel que présenté par Trader Mike. Ce script est une implémentation indépendante d'OS Trading, avec un filtre de biais et une aide à l'exécution ajoutés.
