@@ -1,0 +1,728 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © OS Trading (SakuraTradeLab)
+
+//@version=6
+// ─────────────────────────────────────────────────────────────────────────────
+//  CC MODEL PRO · TheStrat Candle Confirmation · OS Trading
+//  Base : CC model + filtre de biais ICT + aide à l'exécution
+//
+//  LIRE UNIQUEMENT LE BANDEAU (en haut au centre)
+//   Couleur du biais          = pas de trade, attendre un setup aligné
+//   ◉ EN PRÉPARATION          = setup aligné → préparer l'ordre (lot déjà calculé)
+//   ⚡ F2 EN FORMATION         = la bougie en cours forme le F2 → doigt sur le bouton
+//   ✔ LONG / SHORT MAINTENANT = entrer : entrée, SL, TP et lot sont écrits
+//   ⏳ LIMITE                  = poser l'ordre limite au prix affiché
+//   ✖ CONTRE-BIAIS            = signal fantôme gris → NE PAS TRADER
+//
+//  SUR LE GRAPHIQUE
+//   Traits noirs fins          = début (plein) et fin (tirets) de la session des signaux
+//   Boîte pleine « ALIGNÉ ✔ »   = bougie signal tradable
+//   Boîte grise pointillée      = contre-biais, jamais d'alerte ni de lignes d'entrée
+//   Ligne ORANGE pointillée     = ZONE F2 : le niveau à surveiller pour la confirmation
+//   Blanche = entrée · Rouge = SL · Verte = TP1 / TP2 (prolongées à droite)
+//   Ligne grise en escalier     = niveau de flip du biais (clôture au-delà = CHoCH)
+//
+//  Setup A : graphique M15 → signal H1 · Setup B : graphique M5 → signal M15
+//  Un seul trade aligné suivi à la fois. Stats hors spread et slippage.
+// ─────────────────────────────────────────────────────────────────────────────
+indicator("CC Model PRO · TheStrat Candle Confirmation", shorttitle = "CC Model PRO", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 200)
+
+// ───────────── ENTRÉES ─────────────
+const string G1 = "1 · Modèle"
+string tfIn      = input.timeframe("", "Timeframe signal (vide = auto)", group = G1, tooltip = "Auto : graphique M5 ou moins → M15 · graphique M15 → H1 · graphique H1 → H4.")
+int    maxBarsIn = input.int(0, "Bougies de confirmation max (0 = auto)", minval = 0, group = G1, tooltip = "Auto = première moitié de la bougie suivante, 2 bougies minimum.")
+bool   allowLate = input.bool(false, "Accepter une confirmation tardive", group = G1, tooltip = "Désactivé = version stricte de l'auteur.")
+
+const string G2    = "2 · Filtre de biais (anti-piège)"
+const string B_STR = "Structure BOS/CHoCH (ICT)"
+const string B_CDL = "Bougie TheStrat (original)"
+const string B_OFF = "Aucun (déconseillé)"
+string biasMode   = input.string(B_STR, "Filtre de biais", options = [B_STR, B_CDL, B_OFF], group = G2, tooltip = "Structure : la tendance = dernier swing cassé EN CLÔTURE sur le timeframe du biais. Haussier → longs seulement. Baissier → shorts seulement. Le biais ne s'inverse qu'à la clôture au-delà du niveau de flip.")
+string biasTF     = input.timeframe("240", "Timeframe du biais", group = G2)
+int    swLen      = input.int(5, "Force des swings (bougies de chaque côté)", minval = 1, maxval = 10, group = G2, tooltip = "2 = swing confirmé par 2 bougies de chaque côté. Plus haut = biais plus lent et plus stable.")
+bool   showCtr    = input.bool(true, "Montrer les signaux contre-biais en gris (fantômes)", group = G2, tooltip = "Jamais d'alerte, jamais de lignes d'entrée. Simulés à part pour comparer les stats aligné / contre-biais.")
+bool   showBiasBg = input.bool(false, "Teinter le fond selon le biais", group = G2)
+bool   showFlip   = input.bool(true, "Afficher le niveau de flip du biais", group = G2)
+
+const string G3  = "3 · Exécution"
+const string SYM = "1:1 symétrique (auteur)"
+const string STR = "Structurel (extrême du failed 2)"
+float  minRR    = input.float(1.0, "RR minimum vers TP1", minval = 0.5, step = 0.1, group = G3, tooltip = "1.0 = règle de l'auteur. Si la clôture du F2 ne donne pas ce ratio, une limite est placée au prix qui le donne.")
+string stopMode = input.string(SYM, "Stop", options = [SYM, STR], group = G3)
+float  buf      = input.float(0.30, "Marge au-delà du failed 2 (en prix)", minval = 0, step = 0.05, group = G3, tooltip = "XAUUSD : 0.30 · NAS100 : 2 à 5 points. Ajoute ton spread pour les shorts.")
+bool   useTp2In = input.bool(true, "TP2 : 50 % au TP1, stop à BE, reste au TP2", group = G3)
+float  tp2R     = input.float(2.0, "TP2 en R", minval = 1.0, step = 0.25, group = G3)
+float  tp1Off   = input.float(0.0, "TP1 avant la cible (en prix)", minval = 0, step = 0.5, group = G3, tooltip = "Sortir juste avant la liquidité au lieu de pile dessus. NAS100 : 2 à 3 points · XAUUSD : 0.30. 0 = TP1 exactement sur la cible CC.")
+
+const string G4 = "4 · Risque & lot"
+float capital   = input.float(100000, "Capital ($)", minval = 1, group = G4)
+float riskPct   = input.float(0.25, "Risque par trade (%)", minval = 0.01, step = 0.05, group = G4)
+float ptValue   = input.float(1.0, "Valeur de 1.0 de mouvement pour 1 lot ($)", minval = 0.0001, group = G4, tooltip = "MT5 → clic droit sur le symbole → Spécification → Taille du contrat. NAS100 : souvent 1 (1 $ par point et par lot). XAUUSD : 100. Vérifie chez ton broker.")
+float lotStep   = input.float(0.01, "Pas de lot", minval = 0.001, group = G4)
+float brokerOff = input.float(0.0, "Décalage broker (prix MT5 − prix graphique)", step = 0.1, group = G4, tooltip = "Mesure-le au même instant. Ex : MT5 27 855,0 et graphique 27 851,0 → +4.0. Les prix MT5 s'affichent alors entre parenthèses et dans les alertes JSON.")
+
+const string G5 = "5 · Session"
+bool   useSess = input.bool(true, "Signaux seulement pendant la session", group = G5, tooltip = "Hors session : aucun nouveau setup, aucun F2.")
+string sess    = input.session("0800-1200", "Session (heure de New York)", group = G5, tooltip = "08:00-12:00 New York = 13:00-17:00 Londres = 14:00-18:00 Paris.")
+
+const string G6     = "6 · Alertes"
+const string A_TXT  = "Texte"
+const string A_JSON = "JSON (webhook bridge MT5)"
+string alertFmt = input.string(A_TXT, "Format", options = [A_TXT, A_JSON], group = G6, tooltip = "Crée UNE seule alerte sur l'indicateur avec la condition « N'importe quel appel de la fonction alert() ». Seuls les setups ALIGNÉS envoient des alertes.")
+string mt5Sym   = input.string("NAS100", "Symbole MT5 (JSON)", group = G6)
+
+const string G7 = "7 · Affichage"
+color  cBull     = input.color(#2962FF, "Haussier", group = G7, inline = "c")
+color  cBear     = input.color(#E91E63, "Baissier", group = G7, inline = "c")
+color  cF2       = input.color(#FF9800, "Zone F2", group = G7, inline = "c")
+color  cStop     = input.color(#F23645, "SL", group = G7, inline = "c2")
+color  cTp       = input.color(#089981, "TP", group = G7, inline = "c2")
+color  cOff      = input.color(#787B86, "Neutre", group = G7, inline = "c2")
+int    ext       = input.int(12, "Prolonger les lignes à droite (bougies)", minval = 1, maxval = 100, group = G7)
+bool   showWin   = input.bool(false, "Teinter la fenêtre de confirmation", group = G7)
+bool   showSessLn = input.bool(true, "Traits de début / fin de session", group = G7, inline = "s")
+color  cSess     = input.color(#000000, "", group = G7, inline = "s")
+bool   showDead  = input.bool(false, "Afficher les setups annulés", group = G7)
+bool   showBan   = input.bool(true, "Bandeau de décision", group = G7)
+string banSzIn   = input.string("Grand", "Taille du bandeau", options = ["Grand", "Normal", "Petit"], group = G7)
+bool   showStats = input.bool(true, "Tableau de statistiques", group = G7)
+string tPosIn    = input.string("Bas droite", "Position du tableau", options = ["Haut droite", "Bas droite", "Bas gauche", "Haut gauche"], group = G7)
+
+const string G8 = "8 · Suivi de performance"
+int    rollN   = input.int(20, "Taux de TP1 glissant sur N trades", minval = 5, maxval = 100, group = G8)
+float  rollMin = input.float(55.0, "Seuil d'alerte TP1 glissant (%)", minval = 0, maxval = 100, step = 1, group = G8, tooltip = "Sous ce seuil, le système n'est plus rentable avec ta gestion (≈ 50 %). Alerte + avertissement dans le bandeau.")
+string preSess = input.session("0800-0930", "Plage « avant ouverture cash » (heure NY)", group = G8, tooltip = "Les trades dont le F2 tombe dans cette plage sont comptés à part (avant 09:30) pour comparer avec ceux d'après l'ouverture.")
+
+// ───────────── TIMEFRAMES ─────────────
+int    chartSec = timeframe.in_seconds()
+string autoTF   = chartSec <= 300 ? "15" : chartSec <= 900 ? "60" : chartSec <= 3600 ? "240" : "D"
+string sigTF    = tfIn == "" ? autoTF : tfIn
+int    sigSec   = timeframe.in_seconds(sigTF)
+if sigSec <= chartSec
+    runtime.error("CC Model PRO : le timeframe signal doit être supérieur à celui du graphique.")
+int biasSec = timeframe.in_seconds(biasTF)
+if biasMode != B_OFF and biasSec <= chartSec
+    runtime.error("CC Model PRO : le timeframe du biais doit être supérieur à celui du graphique.")
+
+int maxBars = maxBarsIn > 0 ? maxBarsIn : math.max(2, int(math.round(sigSec / chartSec * 0.5)))
+
+f_tfName(int sec) =>
+    sec >= 86400 ? "D" : sec >= 3600 ? "H" + str.tostring(int(sec / 3600)) : "M" + str.tostring(int(sec / 60))
+
+string sigName   = f_tfName(sigSec)
+string chartName = f_tfName(chartSec)
+string bName     = f_tfName(biasSec)
+bool   sessOk    = not useSess or not na(time(timeframe.period, sess, "America/New_York"))
+float  riskUsd   = capital * riskPct / 100
+bool   preOpen   = not na(time(timeframe.period, preSess, "America/New_York"))
+
+// ───────────── OUTILS ─────────────
+f_px(float p) =>
+    str.tostring(p, format.mintick)
+
+// prix graphique + prix MT5 si un décalage broker est réglé
+f_pxm(float p) =>
+    brokerOff == 0 ? f_px(p) : f_px(p) + " (MT5 " + f_px(p + brokerOff) + ")"
+
+f_lots(float dist) =>
+    float res = na
+    if dist > 0
+        res := math.floor(riskUsd / (dist * ptValue) / lotStep + 1e-9) * lotStep
+    res
+
+f_lot(float x) =>
+    na(x) ? "—" : str.tostring(x, "#.##")
+
+f_tag(int x, float y, string txt, color c) =>
+    label.new(x, y, txt, style = label.style_label_left, color = color.new(c, 100), textcolor = c, size = size.small)
+
+f_f2Txt(bool up, float lvl) =>
+    up ? "ZONE F2 · mèche < " + f_pxm(lvl) + " puis clôture au-dessus" : "ZONE F2 · mèche > " + f_pxm(lvl) + " puis clôture en dessous"
+
+f_json(string act, string extra, string txt) =>
+    '{"symbol":"' + mt5Sym + '","action":"' + act + '"' + extra + ',"msg":"' + txt + '"}'
+
+// alerte pendant la bougie (une fois par bougie)
+f_sendNow(string txt, string act, string extra) =>
+    alert(alertFmt == A_JSON ? f_json(act, extra, txt) : "CC Model · " + syminfo.ticker + " · " + txt, alert.freq_once_per_bar)
+
+// alerte à la clôture (appelée uniquement sur bougie confirmée)
+f_sendClose(string txt, string act, string extra) =>
+    alert(alertFmt == A_JSON ? f_json(act, extra, txt) : "CC Model · " + syminfo.ticker + " · " + txt, alert.freq_all)
+
+// ───────────── TYPES ─────────────
+// state : 0 aucun · 1 attente du F2 · 2 limite en attente · 3 en position · 4 runner vers TP2
+type Setup
+    int   state    = 0
+    int   dir      = 0
+    bool  ghost    = false
+    float draw     = na
+    float entry    = na
+    float stop     = na
+    float tp2      = na
+    float risk     = na
+    float r1       = na
+    float lots     = na
+    float f2Lvl    = na
+    float tp1      = na
+    bool  early    = false
+    int   entryBar = 0
+    bool  useTp2   = false
+    box   bx       = na
+    line  lDraw    = na
+    line  lEntry   = na
+    line  lStop    = na
+    line  lTp2     = na
+    line  lF2      = na
+    label lbDraw   = na
+    label lbEntry  = na
+    label lbStop   = na
+    label lbTp2    = na
+    label lbF2     = na
+
+type Stats
+    int   n      = 0
+    int   w      = 0
+    float r      = 0.0
+    int   missed = 0
+    int   nL     = 0
+    int   wL     = 0
+    float rL     = 0.0
+    int   nS     = 0
+    int   wS     = 0
+    float rS     = 0.0
+    int   nE     = 0
+    int   wE     = 0
+    float rE     = 0.0
+    int   nN     = 0
+    int   wN     = 0
+    float rN     = 0.0
+    array<int> hist = na
+
+method trade(Stats this, int d, bool e) =>
+    this.n += 1
+    if d == 1
+        this.nL += 1
+    else
+        this.nS += 1
+    if e
+        this.nE += 1
+    else
+        this.nN += 1
+    array.push(this.hist, 0)
+    if array.size(this.hist) > rollN
+        array.shift(this.hist)
+    this
+
+method win(Stats this, int d, bool e) =>
+    this.w += 1
+    if d == 1
+        this.wL += 1
+    else
+        this.wS += 1
+    if e
+        this.wE += 1
+    else
+        this.wN += 1
+    if array.size(this.hist) > 0
+        array.set(this.hist, array.size(this.hist) - 1, 1)
+    this
+
+method addR(Stats this, int d, bool e, float x) =>
+    this.r += x
+    if d == 1
+        this.rL += x
+    else
+        this.rS += x
+    if e
+        this.rE += x
+    else
+        this.rN += x
+    this
+
+f_roll(Stats s) =>
+    int sz = array.size(s.hist)
+    sz > 0 ? 100.0 * array.sum(s.hist) / sz : na
+
+f_det(Setup s) =>
+    "Entrée " + f_pxm(s.entry) + "  ·  SL " + f_pxm(s.stop) + " (" + f_px(s.risk) + " pts)  ·  TP1 " + f_pxm(s.tp1) + (s.useTp2 ? "  ·  TP2 " + f_pxm(s.tp2) : "") + "  ·  LOT " + f_lot(s.lots)
+
+f_jsonLv(Setup s) =>
+    ',"entry":' + f_px(s.entry + brokerOff) + ',"sl":' + f_px(s.stop + brokerOff) + ',"tp1":' + f_px(s.tp1 + brokerOff) + ',"tp2":' + (s.useTp2 ? f_px(s.tp2 + brokerOff) : "null") + ',"lots":' + str.tostring(nz(s.lots), "#.##")
+
+var Setup sR  = Setup.new()   // setup ALIGNÉ (tradable)
+var Setup sG  = Setup.new()   // setup CONTRE-BIAIS (fantôme)
+var Stats stR = Stats.new(hist = array.new<int>())
+var Stats stG = Stats.new(hist = array.new<int>())
+
+// ───────────── BOUGIE SIGNAL (reconstruite sur le graphique, sans repaint) ─────────────
+var float pH = na
+var float pL = na
+var float cH = na
+var float cL = na
+var float cC = na
+var int   cStart  = na
+var int   barsInN = 0
+
+bool  newHTF  = timeframe.change(sigTF)
+bool  sigBull = false
+bool  sigBear = false
+bool  is3     = false
+float sH      = na
+float sL      = na
+int   sStart  = na
+
+if newHTF
+    if not na(cH) and not na(pH)
+        sigBull := cC > pH
+        sigBear := cC < pL
+        is3     := cH > pH and cL < pL
+    sH      := cH
+    sL      := cL
+    sStart  := cStart
+    pH      := cH
+    pL      := cL
+    cH      := high
+    cL      := low
+    cC      := close
+    cStart  := bar_index
+    barsInN := 1
+else
+    cH      := math.max(nz(cH, high), high)
+    cL      := math.min(nz(cL, low), low)
+    cC      := close
+    barsInN += 1
+
+// ───────────── BIAIS · MODE BOUGIE THESTRAT (original) ─────────────
+var float bpH = na
+var float bpL = na
+var float bcH = na
+var float bcL = na
+var float bcC = na
+var int   biasDirC = 0
+
+if timeframe.change(biasTF)
+    if not na(bcH) and not na(bpH)
+        bool tH = bcH > bpH
+        bool tL = bcL < bpL
+        biasDirC := bcC > bpH ? 1 : bcC < bpL ? -1 : (tL and not tH) ? 1 : (tH and not tL) ? -1 : 0
+    bpH := bcH
+    bpL := bcL
+    bcH := high
+    bcL := low
+    bcC := close
+else
+    bcH := math.max(nz(bcH, high), high)
+    bcL := math.min(nz(bcL, low), low)
+    bcC := close
+
+// ───────────── BIAIS · MODE STRUCTURE BOS/CHoCH (ICT) ─────────────
+// tendance = +1 après clôture au-dessus du dernier swing high, -1 après clôture sous le dernier swing low
+f_struct(int len) =>
+    var int   tr = 0
+    var float sh = na
+    var float sl = na
+    float ph = ta.pivothigh(high, len, len)
+    float pl = ta.pivotlow(low, len, len)
+    if not na(ph)
+        sh := ph
+    if not na(pl)
+        sl := pl
+    if not na(sh) and close > sh
+        tr := 1
+    if not na(sl) and close < sl
+        tr := -1
+    [tr[1], sh[1], sl[1]]
+
+// [1] + lookahead_on = valeurs de la dernière bougie de biais CLÔTURÉE (pas de repaint)
+[bT, bSH, bSL] = request.security(syminfo.tickerid, biasTF, f_struct(swLen), lookahead = barmerge.lookahead_on)
+
+int   biasStruct = nz(bT)
+int   biasNow    = biasMode == B_STR ? biasStruct : biasMode == B_CDL ? biasDirC : 0
+float flipLvl    = biasMode != B_STR ? na : biasNow == -1 ? bSH : biasNow == 1 ? bSL : na
+
+f_aligned(int d) =>
+    bool r = true
+    if biasMode == B_STR
+        r := biasStruct == d
+    else if biasMode == B_CDL
+        r := sigSec <= 900 ? biasDirC == d : biasDirC != -d
+    r
+
+// failed 2 sur la bougie du graphique
+bool f2Bull = low < low[1] and close > low[1]
+bool f2Bear = high > high[1] and close < high[1]
+
+// ───────────── MÉTHODES DU SETUP ─────────────
+method finish(Setup this, string txt, color c, bool above, bool erase) =>
+    if txt != ""
+        label.new(bar_index, na, txt, yloc = above ? yloc.abovebar : yloc.belowbar, style = label.style_none, textcolor = c, size = size.small)
+    if erase
+        box.delete(this.bx)
+        line.delete(this.lDraw)
+    else
+        if this.state != 4
+            line.set_x2(this.lDraw, bar_index)
+        line.set_x2(this.lEntry, bar_index)
+        line.set_x2(this.lStop, bar_index)
+        line.set_x2(this.lTp2, bar_index)
+    line.delete(this.lF2)
+    label.delete(this.lbDraw)
+    label.delete(this.lbEntry)
+    label.delete(this.lbStop)
+    label.delete(this.lbTp2)
+    label.delete(this.lbF2)
+    this.state := 0
+
+method kill(Setup this, string txt, bool above) =>
+    if showDead
+        line.set_color(this.lDraw, cOff)
+        line.set_style(this.lDraw, line.style_dotted)
+        box.set_border_color(this.bx, color.new(cOff, 50))
+        box.set_bgcolor(this.bx, color.new(cOff, 94))
+        this.finish(txt, cOff, above, false)
+    else
+        this.finish("", cOff, above, true)
+    this
+
+method expire(Setup this, Stats st) =>
+    if this.state == 2
+        st.missed += 1
+        line.set_color(this.lEntry, cOff)
+        line.set_color(this.lStop, cOff)
+        line.set_color(this.lTp2, cOff)
+        line.set_color(this.lDraw, cOff)
+        line.set_style(this.lDraw, line.style_dotted)
+        this.finish("", cOff, true, false)
+    else if this.state == 1
+        this.kill("", true)
+    this
+
+method extend(Setup this) =>
+    int xr = bar_index + ext
+    if this.state >= 1 and this.state <= 3
+        line.set_x2(this.lDraw, xr)
+        label.set_x(this.lbDraw, xr)
+    if this.state == 1
+        line.set_x2(this.lF2, xr)
+        label.set_x(this.lbF2, xr)
+    if this.state >= 2
+        line.set_x2(this.lEntry, xr)
+        label.set_x(this.lbEntry, xr)
+        line.set_x2(this.lStop, xr)
+        label.set_x(this.lbStop, xr)
+        if this.useTp2
+            line.set_x2(this.lTp2, xr)
+            label.set_x(this.lbTp2, xr)
+    this
+
+method start(Setup this, int d, float drawLvl, bool ghost, float hi, float lo, int x1, bool three, float lvl) =>
+    color c  = ghost ? cOff : d == 1 ? cBull : cBear
+    int   xr = bar_index + ext
+    this.dir      := d
+    this.draw     := drawLvl
+    this.ghost    := ghost
+    this.state    := 1
+    this.useTp2   := false
+    this.entry    := na
+    this.stop     := na
+    this.tp2      := na
+    this.risk     := na
+    this.r1       := na
+    this.lots     := na
+    this.entryBar := 0
+    this.f2Lvl    := lvl
+    this.tp1      := na
+    this.early    := false
+    this.lEntry   := na
+    this.lStop    := na
+    this.lTp2     := na
+    this.lF2      := na
+    this.lbEntry  := na
+    this.lbStop   := na
+    this.lbTp2    := na
+    this.lbF2     := na
+    string tag = sigName + " · " + (three ? "3" : "2") + (d == 1 ? " ▲" : " ▼") + (ghost ? " · CONTRE-BIAIS ✖" : " · ALIGNÉ ✔")
+    this.bx := box.new(x1, hi, bar_index - 1, lo, border_color = color.new(c, ghost ? 50 : 20), border_style = ghost ? line.style_dotted : line.style_solid, bgcolor = color.new(c, ghost ? 94 : 85), text = tag, text_color = c, text_size = size.small, text_halign = text.align_center, text_valign = d == 1 ? text.align_bottom : text.align_top)
+    this.lDraw  := line.new(bar_index - 1, drawLvl, xr, drawLvl, color = color.new(c, ghost ? 40 : 0), style = ghost ? line.style_dotted : line.style_dashed, width = ghost ? 1 : 2)
+    this.lbDraw := f_tag(xr, drawLvl, ghost ? "cible · contre-biais" : "CIBLE CC " + f_pxm(drawLvl), color.new(c, ghost ? 40 : 0))
+    if not ghost
+        this.lF2  := line.new(bar_index - 1, lvl, xr, lvl, color = cF2, style = line.style_dotted, width = 2)
+        this.lbF2 := f_tag(xr, lvl, f_f2Txt(d == 1, lvl), cF2)
+    this
+
+// machine d'état, appelée à la clôture de chaque bougie du graphique
+method step(Setup this, Stats st) =>
+    if this.state > 0
+        bool   up      = this.dir == 1
+        bool   g       = this.ghost
+        color  cDir    = g ? cOff : up ? cBull : cBear
+        color  cS      = g ? cOff : cStop
+        color  cT      = g ? cOff : cTp
+        string pre     = g ? "◌ " : ""
+        string dW      = up ? "LONG" : "SHORT"
+        bool   hitDraw = up ? high >= this.draw : low <= this.draw
+        bool   hitT1   = up ? high >= this.tp1 : low <= this.tp1
+
+        if this.state == 1
+            if hitDraw
+                this.kill(pre + "✕ cible prise", up)
+            else if not allowLate and barsInN > maxBars
+                this.kill(pre + "✕ hors fenêtre", not up)
+            else
+                bool f2 = up ? f2Bull : f2Bear
+                if f2 and sessOk
+                    float ss    = up ? low - buf : high + buf
+                    // TP1 décalé avant la cible : seul le TP bouge, l'entrée et le stop restent ceux du modèle
+                    float t1    = this.draw - this.dir * tp1Off
+                    float eMax  = math.round_to_mintick((this.draw + minRR * ss) / (1 + minRR))
+                    bool  okNow = up ? close <= eMax : close >= eMax
+                    float e     = okNow ? close : eMax
+                    float sym   = 2 * e - this.draw
+                    float sl    = stopMode == SYM ? (up ? math.min(sym, ss) : math.max(sym, ss)) : ss
+                    float rk    = math.abs(e - sl)
+                    if rk > 0 and (up ? t1 > e : t1 < e)
+                        this.tp1      := t1
+                        this.early    := preOpen
+                        this.entry    := e
+                        this.stop     := sl
+                        this.risk     := rk
+                        this.r1       := math.abs(t1 - e) / rk
+                        this.tp2      := e + this.dir * tp2R * rk
+                        this.useTp2   := useTp2In and tp2R > this.r1
+                        this.lots     := f_lots(rk)
+                        this.entryBar := bar_index
+                        this.state    := okNow ? 3 : 2
+                        line.delete(this.lF2)
+                        label.delete(this.lbF2)
+                        label.new(bar_index, na, g ? "F2 ✖" : "F2", yloc = up ? yloc.belowbar : yloc.abovebar, style = label.style_none, textcolor = cDir, size = g ? size.small : size.normal)
+                        if not g
+                            int xr = bar_index + ext
+                            this.lEntry  := line.new(bar_index, e, xr, e, color = chart.fg_color, style = okNow ? line.style_solid : line.style_dashed, width = 2)
+                            this.lbEntry := f_tag(xr, e, (okNow ? "ENTRÉE " : "LIMITE ") + f_pxm(e) + " · " + f_lot(this.lots) + " lots", chart.fg_color)
+                            this.lStop   := line.new(bar_index, sl, xr, sl, color = cStop, width = 2)
+                            this.lbStop  := f_tag(xr, sl, "SL " + f_pxm(sl) + " · " + f_px(rk) + " pts", cStop)
+                            line.set_color(this.lDraw, cTp)
+                            line.set_style(this.lDraw, line.style_solid)
+                            line.set_y1(this.lDraw, t1)
+                            line.set_y2(this.lDraw, t1)
+                            label.set_y(this.lbDraw, t1)
+                            label.set_textcolor(this.lbDraw, cTp)
+                            label.set_text(this.lbDraw, "TP1 " + f_pxm(t1) + " · " + str.tostring(this.r1, "#.##") + "R" + (tp1Off > 0 ? " (cible " + f_px(this.draw) + ")" : ""))
+                            if this.useTp2
+                                this.lTp2  := line.new(bar_index, this.tp2, xr, this.tp2, color = cTp, style = line.style_dashed, width = 1)
+                                this.lbTp2 := f_tag(xr, this.tp2, "TP2 " + f_pxm(this.tp2) + " · " + str.tostring(tp2R, "#.##") + "R", cTp)
+                            string act = (up ? "buy" : "sell") + (okNow ? "" : "_limit")
+                            f_sendClose((okNow ? "✔ " + dW + " MAINTENANT · " : "⏳ LIMITE " + dW + " à poser · ") + f_det(this), act, f_jsonLv(this))
+                if this.state == 1
+                    if not allowLate and barsInN >= maxBars
+                        this.kill(pre + "✕ hors fenêtre", not up)
+                    else
+                        // la prochaine bougie se compare à celle-ci : mise à jour de la zone F2
+                        this.f2Lvl := up ? low : high
+                        line.set_x1(this.lF2, bar_index)
+                        line.set_y1(this.lF2, this.f2Lvl)
+                        line.set_y2(this.lF2, this.f2Lvl)
+                        label.set_y(this.lbF2, this.f2Lvl)
+                        label.set_text(this.lbF2, f_f2Txt(up, this.f2Lvl))
+
+        else if this.state == 2
+            bool filled = up ? low <= this.entry : high >= this.entry
+            if hitT1
+                st.missed += 1
+                line.set_color(this.lEntry, cOff)
+                line.set_color(this.lStop, cOff)
+                line.set_color(this.lTp2, cOff)
+                this.finish(pre + "✕ parti sans entrée", cOff, up, false)
+                if not g
+                    f_sendClose("✕ Cible atteinte sans remplissage → ANNULER la limite " + dW, "cancel", "")
+            else if filled
+                this.state    := 3
+                this.entryBar := 0
+                line.set_style(this.lEntry, line.style_solid)
+                label.set_text(this.lbEntry, "ENTRÉE " + f_pxm(this.entry) + " · " + f_lot(this.lots) + " lots")
+                bool stopSameBar = up ? low <= this.stop : high >= this.stop
+                if stopSameBar
+                    st.trade(this.dir, this.early)
+                    st.addR(this.dir, this.early, -1.0)
+                    this.finish(pre + "SL −1R", cS, not up, false)
+
+        else if this.state == 3
+            bool hitStop = up ? low <= this.stop : high >= this.stop
+            if hitStop
+                // stop et cible dans la même bougie : compté comme perte (prudent)
+                st.trade(this.dir, this.early)
+                st.addR(this.dir, this.early, -1.0)
+                this.finish(pre + "SL −1R", cS, not up, false)
+                if not g
+                    f_sendClose("SL touché · " + dW + " −1R", "info", "")
+            else if hitT1
+                st.trade(this.dir, this.early)
+                st.win(this.dir, this.early)
+                bool hitTp2Now = this.useTp2 and (up ? high >= this.tp2 : low <= this.tp2)
+                if not this.useTp2
+                    st.addR(this.dir, this.early, this.r1)
+                    this.finish(pre + "TP1 +" + str.tostring(this.r1, "#.##") + "R", cT, up, false)
+                    if not g
+                        f_sendClose("TP1 touché · " + dW + " +" + str.tostring(this.r1, "#.##") + "R", "info", "")
+                else if hitTp2Now
+                    float res = 0.5 * this.r1 + 0.5 * tp2R
+                    st.addR(this.dir, this.early, res)
+                    this.finish(pre + "TP2 +" + str.tostring(res, "#.##") + "R", cT, up, false)
+                    if not g
+                        f_sendClose("TP1 et TP2 touchés · " + dW + " +" + str.tostring(res, "#.##") + "R", "info", "")
+                else
+                    // 50 % sortis, stop à breakeven
+                    this.state := 4
+                    this.stop  := this.entry
+                    line.set_x2(this.lDraw, bar_index)
+                    line.set_xy1(this.lStop, bar_index, this.entry)
+                    line.set_xy2(this.lStop, bar_index + ext, this.entry)
+                    label.set_xy(this.lbStop, bar_index + ext, this.entry)
+                    label.set_text(this.lbStop, "SL → BE " + f_pxm(this.entry))
+                    label.delete(this.lbEntry)
+                    label.delete(this.lbDraw)
+                    label.new(bar_index, na, pre + "TP1 ✔", yloc = up ? yloc.abovebar : yloc.belowbar, style = label.style_none, textcolor = cT, size = size.small)
+                    if not g
+                        f_sendClose("TP1 touché · sortir 50 % · SL à BE " + f_pxm(this.entry), "partial_be", ',"close_pct":50,"sl":' + f_px(this.entry + brokerOff))
+
+        else if this.state == 4
+            bool hitBE  = up ? low <= this.entry : high >= this.entry
+            bool hitTp2 = up ? high >= this.tp2 : low <= this.tp2
+            if hitBE
+                float res = 0.5 * this.r1
+                st.addR(this.dir, this.early, res)
+                this.finish(pre + "BE +" + str.tostring(res, "#.##") + "R", cOff, not up, false)
+                if not g
+                    f_sendClose("Runner sorti à BE · " + dW + " +" + str.tostring(res, "#.##") + "R", "info", "")
+            else if hitTp2
+                float res = 0.5 * this.r1 + 0.5 * tp2R
+                st.addR(this.dir, this.early, res)
+                this.finish(pre + "TP2 +" + str.tostring(res, "#.##") + "R", cT, up, false)
+                if not g
+                    f_sendClose("TP2 touché · " + dW + " +" + str.tostring(res, "#.##") + "R", "info", "")
+    this
+
+// ───────────── NOUVEAU SIGNAL ─────────────
+if newHTF
+    bool limitDead = sR.state == 2
+    sR.expire(stR)
+    sG.expire(stG)
+    string msg = limitDead ? "Limite expirée → ANNULER l'ordre sur MT5. " : ""
+    if (sigBull or sigBear) and sessOk
+        int   d   = sigBull ? 1 : -1
+        float dl  = sigBull ? sH : sL
+        float lvl = sigBull ? low[1] : high[1]
+        if f_aligned(d)
+            if sR.state == 0
+                sR.start(d, dl, false, sH, sL, sStart, is3, lvl)
+                msg += "◉ SETUP " + (d == 1 ? "LONG" : "SHORT") + " " + sigName + " aligné · cible " + f_pxm(dl) + " · zone F2 " + f_pxm(lvl) + " · lot ≈ " + f_lot(f_lots(math.abs(lvl - dl)))
+        else if showCtr and sG.state == 0
+            sG.start(d, dl, true, sH, sL, sStart, is3, lvl)
+    if msg != ""
+        f_sendNow(msg, limitDead ? "cancel" : "info", "")
+
+// ───────────── CLÔTURE DE BOUGIE ─────────────
+if barstate.isconfirmed
+    sR.step(stR)
+    sG.step(stG)
+
+sR.extend()
+sG.extend()
+
+// F2 en train de se former sur la bougie en cours (temps réel)
+bool f2Forming = sR.state == 1 and sessOk and not barstate.isconfirmed and (sR.dir == 1 ? f2Bull : f2Bear)
+if f2Forming
+    f_sendNow("⚡ F2 " + (sR.dir == 1 ? "LONG" : "SHORT") + " en formation · prépare l'ordre · lot ≈ " + f_lot(f_lots(math.abs(sR.f2Lvl - sR.draw))), "prepare", "")
+
+// ───────────── AFFICHAGE ─────────────
+color cBias = biasNow == 1 ? cBull : biasNow == -1 ? cBear : cOff
+bgcolor(showBiasBg and biasMode != B_OFF and biasNow != 0 ? color.new(cBias, 95) : na, title = "Biais")
+bgcolor(showWin and sR.state == 1 ? color.new(sR.dir == 1 ? cBull : cBear, 88) : na, title = "Fenêtre de confirmation")
+plot(showFlip ? flipLvl : na, "Niveau de flip du biais", color = color.new(cOff, 30), linewidth = 1, style = plot.style_stepline)
+
+// ── Traits fins de session (début et fin de la fenêtre des signaux) ──
+bool inSess = not na(time(timeframe.period, sess, "America/New_York"))
+if showSessLn and inSess and not inSess[1]
+    line.new(bar_index, high, bar_index, low, extend = extend.both, color = cSess, width = 1)
+if showSessLn and not inSess and inSess[1]
+    line.new(bar_index, high, bar_index, low, extend = extend.both, color = cSess, width = 1, style = line.style_dashed)
+
+// ── Suivi du taux de TP1 glissant ──
+float rollPct = f_roll(stR)
+bool  rollLow = array.size(stR.hist) >= math.min(10, rollN) and rollPct < rollMin
+var bool wasLow = false
+if rollLow and not wasLow
+    f_sendNow("⚠ TP1 sur les " + str.tostring(array.size(stR.hist)) + " derniers trades = " + str.tostring(rollPct, "#") + " % < " + str.tostring(rollMin, "#") + " % → STOP, analyse avant de reprendre", "info", "")
+wasLow := rollLow
+string rollWarn = rollLow ? "  ·  ⚠ TP1 " + str.tostring(rollPct, "#") + " % sur " + str.tostring(array.size(stR.hist)) + " trades → STOP & ANALYSE" : ""
+
+// ── Bandeau de décision ──
+string bSz1 = banSzIn == "Grand" ? size.large : banSzIn == "Normal" ? size.normal : size.small
+string bSz2 = banSzIn == "Grand" ? size.normal : banSzIn == "Normal" ? size.small : size.tiny
+var table bn = table.new(position.top_center, 1, 2, border_width = 0, frame_width = 0)
+
+string bLbl  = biasMode == B_OFF ? "FILTRE BIAIS OFF ⚠" : biasNow == 1 ? bName + " ▲ HAUSSIER" : biasNow == -1 ? bName + " ▼ BAISSIER" : bName + " ◆ NEUTRE"
+string allow = biasMode == B_OFF ? "tous les signaux" : biasNow == 1 ? "LONGS UNIQUEMENT" : biasNow == -1 ? "SHORTS UNIQUEMENT" : biasMode == B_CDL and sigSec > 900 ? "longs et shorts" : "AUCUN TRADE"
+string flipT = not na(flipLvl) ? "  ·  flip si clôture " + bName + (biasNow == -1 ? " > " : " < ") + f_pxm(flipLvl) : ""
+
+if showBan and barstate.islast
+    string l1 = bLbl + " · " + allow
+    string l2 = (sessOk ? "Attendre un setup " + sigName + " aligné" : "Hors session · pas de nouveau setup") + flipT
+    color  bg = color.new(cBias, 30)
+    if sR.state >= 1
+        bool   up = sR.dir == 1
+        string dW = up ? "LONG ▲" : "SHORT ▼"
+        color  cD = up ? cBull : cBear
+        if sR.state == 1
+            float rk = math.abs(sR.f2Lvl - sR.draw)
+            l1 := f2Forming ? "⚡ F2 EN FORMATION · " + dW + " À LA CLÔTURE" : "◉ " + dW + " EN PRÉPARATION · attendre F2 (" + str.tostring(barsInN) + "/" + str.tostring(maxBars) + ")"
+            bg := f2Forming ? color.new(cF2, 0) : color.new(cD, 30)
+            l2 := "Zone F2 " + f_pxm(sR.f2Lvl) + "  ·  cible " + f_pxm(sR.draw) + "  ·  risque ≈ " + f_px(rk) + " pts  ·  lot ≈ " + f_lot(f_lots(rk))
+        else if sR.state == 2
+            l1 := "⏳ LIMITE " + dW + " " + f_pxm(sR.entry) + " · ordre à poser"
+            bg := color.new(cD, 15)
+            l2 := f_det(sR)
+        else if sR.state == 3
+            bool fresh = bar_index - sR.entryBar <= 1
+            l1 := fresh ? "✔ " + dW + " MAINTENANT" : "● EN POSITION " + dW + " → TP1"
+            bg := color.new(cD, fresh ? 0 : 20)
+            l2 := f_det(sR)
+        else
+            l1 := "● RUNNER " + dW + " → TP2 · stop à BE"
+            bg := color.new(cD, 20)
+            l2 := "BE " + f_pxm(sR.entry) + "  ·  TP2 " + f_pxm(sR.tp2) + "  ·  50 % encaissés"
+    else if sG.state >= 1
+        l1 := "✖ " + (sG.dir == 1 ? "LONG" : "SHORT") + " CONTRE-BIAIS · NE PAS TRADER"
+        bg := color.new(#434651, 0)
+        l2 := bLbl + " · " + allow + flipT
+    l2 += rollWarn
+    table.cell(bn, 0, 0, l1, bgcolor = bg, text_color = color.white, text_size = bSz1)
+    table.cell(bn, 0, 1, l2, bgcolor = color.new(#131722, 15), text_color = color.white, text_size = bSz2)
+
+// ── Tableau de statistiques ──
+string tPos = tPosIn == "Haut droite" ? position.top_right : tPosIn == "Bas droite" ? position.bottom_right : tPosIn == "Bas gauche" ? position.bottom_left : position.top_left
+var table t = table.new(tPos, 2, 13, bgcolor = color.new(chart.bg_color, 10), border_color = color.new(cOff, 70), border_width = 1, frame_color = color.new(cOff, 70), frame_width = 1)
+
+f_row(int r, string k, string v, color c) =>
+    table.cell(t, 0, r, k, text_color = cOff, text_size = size.small, text_halign = text.align_left)
+    table.cell(t, 1, r, v, text_color = c, text_size = size.small, text_halign = text.align_right)
+
+f_stat(int n, int w, float r) =>
+    n > 0 ? str.tostring(n) + " · " + str.tostring(100.0 * w / n, "#") + " % · " + str.tostring(r, "#.##") + " R" : "—"
+
+if showStats and barstate.islast
+    color cTxt = chart.fg_color
+    f_row(0, "CC Model PRO", sigName + " → " + chartName, cTxt)
+    f_row(1, "Biais " + bName, biasMode == B_OFF ? "non filtré ⚠" : biasNow == 1 ? "haussier ▲" : biasNow == -1 ? "baissier ▼" : "neutre", cBias)
+    f_row(2, "Trades alignés", str.tostring(stR.n) + "  ·  manqués " + str.tostring(stR.missed), cTxt)
+    f_row(3, "TP1 atteint", stR.n > 0 ? str.tostring(100.0 * stR.w / stR.n, "#.#") + " %" : "—", cTxt)
+    f_row(4, "TP1 · " + str.tostring(rollN) + " derniers", na(rollPct) ? "—" : str.tostring(rollPct, "#") + " % (" + str.tostring(array.size(stR.hist)) + ")" + (rollLow ? " ⚠" : ""), rollLow ? cStop : na(rollPct) ? cTxt : cTp)
+    f_row(5, "R total", str.tostring(stR.r, "#.##") + " R", stR.r >= 0 ? cTp : cStop)
+    f_row(6, "R moyen", stR.n > 0 ? str.tostring(stR.r / stR.n, "#.##") + " R" : "—", cTxt)
+    f_row(7, "Long", f_stat(stR.nL, stR.wL, stR.rL), cBull)
+    f_row(8, "Short", f_stat(stR.nS, stR.wS, stR.rS), cBear)
+    f_row(9, "Avant 09:30 NY", f_stat(stR.nE, stR.wE, stR.rE), cTxt)
+    f_row(10, "Après 09:30 NY", f_stat(stR.nN, stR.wN, stR.rN), cTxt)
+    f_row(11, "Contre-biais ◌", showCtr ? f_stat(stG.n, stG.w, stG.r) : "masqué", cOff)
+    f_row(12, "Risque", str.tostring(riskUsd, "#") + " $ (" + str.tostring(riskPct) + " %)", cTxt)
