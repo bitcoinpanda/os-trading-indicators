@@ -1,12 +1,13 @@
 # OS Trading · Indicateurs TradingView
 
-Indicateurs Pine Script (TradingView) développés par **OS Trading** pour le trading intraday : ICT / Smart Money Concepts, TheStrat, price action.
+Indicateurs Pine Script (TradingView) développés par **OS Trading** pour le trading intraday : ICT / Smart Money Concepts, TheStrat, cassures de range, price action.
 
 ## Indicateurs
 
 | Indicateur | Description | Marchés testés | Version |
 |---|---|---|---|
 | [CC Model PRO](./indicators/cc-model-pro/) | Modèle CC (Candle Confirmation) de TheStrat + filtre de biais ICT BOS/CHoCH + entrée, SL, TP et lot affichés | NAS100, XAUUSD | 1.0 |
+| [London Breakout NQ](./indicators/london-breakout-nq/) | Range London 4h-9h ET, première cassure 9h30-11h, SL sous la bougie, TP 2R, backtest intégré | NAS100 M1 | 1.0 |
 
 ## Installation rapide
 
@@ -18,11 +19,12 @@ Le mode d'emploi complet de chaque indicateur est dans son dossier.
 
 ## 🇬🇧 English
 
-TradingView (Pine Script) indicators by **OS Trading** for intraday trading: ICT / Smart Money Concepts, TheStrat, price action.
+TradingView (Pine Script) indicators by **OS Trading** for intraday trading: ICT / Smart Money Concepts, TheStrat, range breakouts, price action.
 
 | Indicator | Description | Tested on | Guide |
 |---|---|---|---|
 | CC Model PRO | TheStrat CC model + ICT BOS/CHoCH bias filter + entry, SL, TP and lot size on chart | NAS100, XAUUSD | [English guide](./indicators/cc-model-pro/README.en.md) |
+| London Breakout NQ | London range 4-9am ET, first breakout 9:30-11am, SL beyond the candle, 2R TP, built-in backtest | NAS100 1m | [English guide](./indicators/london-breakout-nq/README.en.md) |
 
 **Install**: open the indicator folder → `.pine` file → **Copy raw file** → TradingView **Pine Editor** → **Open** → **New indicator** → paste → **Save** → **Add to chart**.
 

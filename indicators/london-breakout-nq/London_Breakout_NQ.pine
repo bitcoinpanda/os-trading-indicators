@@ -1,0 +1,478 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © OS Trading (SakuraTradeLab)
+
+//@version=6
+indicator("London Breakout NQ (4h-9h ET / entrée 9h30-11h)", "LDN BO", overlay = true, max_boxes_count = 500, max_lines_count = 500, max_labels_count = 500)
+
+// ─────────────────────────── Inputs ───────────────────────────
+string TZ       = input.string("America/New_York", "Fuseau des sessions", group = "Sessions")
+string RANGE_S  = input.session("0400-0900", "Range London (ET)", group = "Sessions")
+string TRADE_S  = input.session("0930-1100", "Fenêtre d'entrée (ET)", group = "Sessions")
+string MANAGE_S = input.session("0930-1600", "Gestion (sortie forcée à la fin)", group = "Sessions")
+
+float  RR       = input.float(2.0, "R:R du TP (TP2 si TP1 actif)", minval = 0.5, step = 0.25, group = "Trade")
+float  SL_BUF   = input.float(0.0, "Buffer SL (points)", minval = 0, group = "Trade")
+string GAP_MODE = input.string("Sauter le jour", "Prix déjà hors range à 9h30", options = ["Sauter le jour", "Entrer à l'ouverture 9h30"], group = "Trade")
+bool   STRICT   = input.bool(true, "Bougie d'entrée refermée dans le range = perte", group = "Trade", tooltip = "Utilisé seulement si l'intrabar est désactivé. En intrabar, l'ordre des prix est connu à la minute près.")
+string SIDES    = input.string("Les deux", "Sens", options = ["Les deux", "Achats", "Ventes"], group = "Trade", tooltip = "Règle 1 trade/jour : si le premier côté cassé est exclu, pas de trade ce jour-là.")
+
+bool   USE_TP1  = input.bool(false, "TP1 partiel + SL à BE", group = "TP1 / BE", tooltip = "Désactivé = version vidéo (TP unique). Activé = ta gestion : TP1, SL à breakeven, reste à TP2 (= R:R du TP).")
+float  TP1_R    = input.float(1.0, "TP1 (R)", minval = 0.25, step = 0.25, group = "TP1 / BE")
+float  TP1_PCT  = input.float(50, "Part fermée au TP1 (%)", minval = 0, maxval = 100, step = 5, group = "TP1 / BE")
+
+string RF_MODE  = input.string("Aucun", "Filtre taille du range", options = ["Aucun", "Points", "× ATR jour"], group = "Filtre range", tooltip = "Saute les jours où le range 4h-9h est trop petit ou trop grand (jours de news). ATR 14 jours de la veille.")
+float  RF_MIN   = input.float(0.0, "Min", minval = 0, step = 0.05, group = "Filtre range", inline = "rf")
+float  RF_MAX   = input.float(1.0, "Max", minval = 0, step = 0.05, group = "Filtre range", inline = "rf")
+
+bool   INTRA    = input.bool(true, "Simuler en intrabar", group = "Résolution", tooltip = "Rejoue chaque bougie du graphique minute par minute : cassure, SL et TP dans l'ordre réel. Limite TradingView ~100k bougies intrabar.")
+string LTF      = input.timeframe("1", "TF intrabar", group = "Résolution")
+string SL_REF   = input.string("Bougie du graphique", "SL sous la bougie", options = ["Bougie du graphique", "Bougie 1 minute"], group = "Résolution", tooltip = "Bougie du graphique : version vidéo M5, SL au plus bas/haut de la bougie connu au moment de l'entrée.\nBougie 1 minute : version M1, SL sous la bougie intrabar qui casse.")
+
+bool   SHOW_TODAY = input.bool(true, "Panneau Aujourd'hui", group = "Affichage")
+string TODAY_POS  = input.string("Bas gauche", "Position panneau", options = ["Haut droite", "Haut gauche", "Bas droite", "Bas gauche"], group = "Affichage")
+bool   SHOW_TBL   = input.bool(true, "Tableau stats", group = "Affichage")
+bool   SHOW_GRID  = input.bool(true, "Grille SL fixe", group = "Affichage")
+string TBL_POS    = input.string("Haut droite", "Position tableaux", options = ["Haut droite", "Haut gauche", "Bas droite", "Bas gauche"], group = "Affichage")
+bool   SHOW_LBL   = input.bool(true, "Labels résultat", group = "Affichage")
+bool   SHOW_WIN   = input.bool(true, "Fond fenêtre 9h30-11h", group = "Affichage")
+color  C_WIN      = input.color(color.new(color.orange, 93), "Couleur fenêtre", group = "Affichage")
+color  C_SL       = input.color(color.red, "Zone SL", group = "Affichage")
+color  C_TP       = input.color(color.green, "Zone TP", group = "Affichage")
+
+color  C_BOX     = input.color(color.new(color.blue, 90), "Fond box", group = "Box session")
+color  C_BORD    = input.color(color.new(color.blue, 40), "Bord box", group = "Box session")
+bool   SHOW_MID  = input.bool(true, "Milieu en pointillés", group = "Box session")
+bool   SHOW_TAG  = input.bool(true, "Étiquette", group = "Box session", inline = "tag")
+string TAG_TXT   = input.string("SESSION", "", group = "Box session", inline = "tag")
+color  C_HL      = input.color(color.black, "Traits haut / bas", group = "Box session")
+int    HL_W      = input.int(1, "Épaisseur traits", minval = 1, maxval = 4, group = "Box session")
+string EXT_TO    = input.string("Fin de gestion (16h)", "Prolonger les traits jusqu'à", options = ["Fin fenêtre d'entrée (11h)", "Fin de gestion (16h)"], group = "Box session")
+
+bool USE_DATES = input.bool(false, "Limiter les stats à une période", group = "Période", tooltip = "Pour comparer deux timeframes sur exactement les mêmes jours.")
+int  D_START   = input.time(timestamp("01 Sep 2026 00:00 +0000"), "Début", group = "Période")
+int  D_END     = input.time(timestamp("31 Dec 2026 00:00 +0000"), "Fin", group = "Période")
+
+// ─────────────────────────── Sessions ───────────────────────────
+bool inRange = not na(time(timeframe.period, RANGE_S, TZ))
+bool inWin   = not na(time(timeframe.period, TRADE_S, TZ))
+bool inMgmt  = not na(time(timeframe.period, MANAGE_S, TZ))
+bool rStart  = inRange and not inRange[1]
+bool rEnd    = not inRange and inRange[1]
+bool wStart  = inWin and not inWin[1]
+bool wEnd    = not inWin and inWin[1]
+bool mEnd    = not inMgmt and inMgmt[1]
+bool dayOk   = not USE_DATES or (time >= D_START and time <= D_END)
+
+bgcolor(SHOW_WIN and inWin ? C_WIN : na, title = "Fenêtre d'entrée")
+
+// ATR jour de la veille (pas de repaint)
+float atrD = request.security(syminfo.tickerid, "D", ta.atr(14)[1], lookahead = barmerge.lookahead_on)
+
+// ─────────────────────────── Intrabar ───────────────────────────
+bool   INTRA_ON = INTRA and timeframe.in_seconds() > timeframe.in_seconds(LTF)
+string LTF_USE  = INTRA_ON ? LTF : timeframe.period
+[ltH, ltL, ltC] = request.security_lower_tf(syminfo.tickerid, LTF_USE, [high, low, close])
+bool         noLtf = INTRA_ON and array.size(ltH) == 0
+array<float> aH    = INTRA_ON and not noLtf ? ltH : array.from(high)
+array<float> aL    = INTRA_ON and not noLtf ? ltL : array.from(low)
+array<float> aC    = INTRA_ON and not noLtf ? ltC : array.from(close)
+bool         subOn = INTRA_ON and not noLtf
+
+// ─────────────────────────── État ───────────────────────────
+var float  rHi      = na
+var float  rLo      = na
+var float  rng      = na
+var float  rAtr     = na
+var bool   building = false
+var bool   ready    = false
+var bool   done     = false
+var bool   inPos    = false
+var int    dir      = 0
+var float  ent      = na
+var float  sl       = na
+var float  tp       = na
+var float  tp1      = na
+var bool   tp1Hit   = false
+var float  risk     = na
+var int    entBar   = na
+var int    entSub   = 0
+var box    bx       = na
+var box    zTP      = na
+var box    zSL      = na
+var line   lTP1     = na
+var bool   fbDay    = false
+var int    bxLeft   = na
+var label  tag      = na
+var line   lMid     = na
+var line   lHi      = na
+var line   lLo      = na
+var bool   extOn    = false
+var string stTxt    = "-"
+var color  stCol    = color.gray
+
+// Stats
+var array<float> res = array.new_float()
+var int   nDays = 0
+var int   nGap  = 0
+var int   nRF   = 0
+var int   nNoBk = 0
+var int   nAmb  = 0
+var int   nSide = 0
+var int   nTime = 0
+var int   nFb   = 0
+var int   nBE   = 0
+var int   nL    = 0
+var int   nS    = 0
+var float sumL  = 0.0
+var float sumS  = 0.0
+var int   strk  = 0
+var int   maxStrk = 0
+var float sumRisk = 0.0
+var float sumRiskPct = 0.0
+
+// Grille : SL fixe = k × range, TP = RR × SL (même entrée que la stratégie, TP unique)
+var array<float> K     = array.from(0.10, 0.20, 0.35, 0.50)
+var array<float> GRR   = array.from(2.0, 3.0)
+var array<int>   gSt   = array.new_int(8, 0)
+var array<float> gSL   = array.new_float(8, na)
+var array<float> gTP   = array.new_float(8, na)
+var array<float> gN    = array.new_float(8, 0.0)
+var array<float> gSum  = array.new_float(8, 0.0)
+var array<float> gW    = array.new_float(8, 0.0)
+
+gRec(int i, float r) =>
+    array.set(gN, i, array.get(gN, i) + 1)
+    array.set(gSum, i, array.get(gSum, i) + r)
+    if r > 0
+        array.set(gW, i, array.get(gW, i) + 1)
+    array.set(gSt, i, 2)
+
+fmtP(float p) => str.tostring(p, format.mintick)
+
+float closeR   = na
+int   exitKind = 0   // 1 SL, 2 TP, 3 temps, 4 BE
+float pPart    = USE_TP1 ? TP1_PCT / 100.0 : 0.0
+float tp1Gain  = pPart * TP1_R
+
+// ─────────────────────────── Fin de gestion (sortie forcée) ───────────────────────────
+if mEnd
+    if inPos
+        float rLive = (close[1] - ent) / risk * dir
+        closeR   := tp1Hit ? tp1Gain + (1 - pPart) * rLive : rLive
+        exitKind := 3
+    for i = 0 to 7
+        if array.get(gSt, i) == 1
+            float gk = array.get(K, math.floor(i / 2)) * rng
+            gRec(i, (close[1] - ent) / gk * dir)
+    if ready and not done
+        nNoBk += 1
+    ready := false
+
+// ─────────────────────────── Range 4h-9h ───────────────────────────
+if rStart
+    ready := false
+    done  := false
+    fbDay := false
+    if dayOk
+        rHi      := high
+        rLo      := low
+        building := true
+        bxLeft   := bar_index
+        stTxt    := "Range en cours (4h-9h)"
+        stCol    := color.silver
+        bx       := box.new(bar_index, rHi, bar_index, rLo, border_color = C_BORD, border_width = 1, bgcolor = C_BOX)
+        if SHOW_MID
+            lMid := line.new(bar_index, (rHi + rLo) / 2, bar_index, (rHi + rLo) / 2, color = C_BORD, style = line.style_dashed)
+        if SHOW_TAG
+            tag := label.new(bar_index, rHi, TAG_TXT, style = label.style_label_down, color = color.white, textcolor = color.black, size = size.normal, text_formatting = text.format_bold + text.format_italic)
+    else
+        rHi      := na
+        rLo      := na
+        building := false
+else if inRange and building
+    rHi := math.max(rHi, high)
+    rLo := math.min(rLo, low)
+    box.set_top(bx, rHi)
+    box.set_bottom(bx, rLo)
+    box.set_right(bx, bar_index)
+    if SHOW_MID
+        line.set_xy1(lMid, bxLeft, (rHi + rLo) / 2)
+        line.set_xy2(lMid, bar_index, (rHi + rLo) / 2)
+    if SHOW_TAG
+        label.set_xy(tag, math.round((bxLeft + bar_index) / 2), rHi)
+
+if rEnd and building
+    building := false
+    nDays    += 1
+    rAtr     := (rHi - rLo) / atrD
+    float rMeas = RF_MODE == "Points" ? rHi - rLo : rAtr
+    bool  rfOk  = RF_MODE == "Aucun" or na(rMeas) or (rMeas >= RF_MIN and rMeas <= RF_MAX)
+    if rfOk
+        ready := true
+        extOn := true
+        stTxt := "Range prêt · attente 9h30"
+        stCol := color.white
+        lHi := line.new(bar_index - 1, rHi, bar_index, rHi, color = C_HL, width = HL_W)
+        lLo := line.new(bar_index - 1, rLo, bar_index, rLo, color = C_HL, width = HL_W)
+        alert("LDN BO " + syminfo.ticker + " | range prêt  H " + fmtP(rHi) + "  L " + fmtP(rLo), alert.freq_once_per_bar_close)
+    else
+        nRF   += 1
+        stTxt := "Sauté : range hors filtre"
+        stCol := color.orange
+        box.set_bgcolor(bx, color.new(color.gray, 90))
+        box.set_border_color(bx, color.gray)
+        box.set_border_style(bx, line.style_dashed)
+        if SHOW_TAG
+            label.set_text(tag, TAG_TXT + " · SAUTÉ")
+else if extOn
+    bool stopExt = EXT_TO == "Fin fenêtre d'entrée (11h)" ? wEnd : mEnd
+    if stopExt
+        extOn := false
+    else
+        line.set_x2(lHi, bar_index)
+        line.set_x2(lLo, bar_index)
+
+// Jours où l'intrabar manque (simulation retombe sur la bougie du graphique)
+if noLtf and inWin and (ready or inPos) and not fbDay
+    fbDay := true
+    nFb   += 1
+
+// ─────────────────────────── Gap à 9h30 ───────────────────────────
+bool gapEntry = false
+if inWin and wStart and ready and not done and not inPos
+    if open > rHi or open < rLo
+        if GAP_MODE == "Sauter le jour"
+            done  := true
+            nGap  += 1
+            stTxt := "Sauté : déjà hors range à 9h30"
+            stCol := color.orange
+        else
+            gapEntry := true
+    else
+        stTxt := "Fenêtre ouverte · attente cassure"
+        stCol := color.yellow
+
+if wEnd and ready and not done and not inPos
+    stTxt := "Pas de cassure aujourd'hui"
+    stCol := color.gray
+
+// ─────────────────────────── Moteur (bougie par bougie intrabar) ───────────────────────────
+if inMgmt and not mEnd
+    float runLo = na
+    float runHi = na
+    int   nSub  = array.size(aH)
+    for j = 0 to nSub - 1
+        float h = array.get(aH, j)
+        float l = array.get(aL, j)
+        float c = array.get(aC, j)
+        runLo := na(runLo) ? l : math.min(runLo, l)
+        runHi := na(runHi) ? h : math.max(runHi, h)
+        bool after = not na(entBar) and (bar_index > entBar or (bar_index == entBar and j > entSub))
+
+        // Gestion du trade principal (SL prioritaire)
+        if inPos and na(closeR) and after
+            bool hitSL = dir == 1 ? l <= sl : h >= sl
+            bool hitTP = dir == 1 ? h >= tp : l <= tp
+            if not tp1Hit
+                if hitSL
+                    closeR   := -1.0
+                    exitKind := 1
+                else if USE_TP1 and (dir == 1 ? h >= tp1 : l <= tp1)
+                    tp1Hit := true
+                    sl     := ent
+                    box.set_bgcolor(zSL, color.new(color.gray, 80))
+                    box.set_text(zSL, "SL → BE")
+                    if hitTP
+                        closeR   := tp1Gain + (1 - pPart) * RR
+                        exitKind := 2
+                else if hitTP
+                    closeR   := RR
+                    exitKind := 2
+            else
+                if hitSL
+                    closeR   := tp1Gain
+                    exitKind := 4
+                else if hitTP
+                    closeR   := tp1Gain + (1 - pPart) * RR
+                    exitKind := 2
+
+        // Gestion de la grille
+        if after
+            for i = 0 to 7
+                if array.get(gSt, i) == 1
+                    float s = array.get(gSL, i)
+                    float t = array.get(gTP, i)
+                    if dir == 1 ? l <= s : h >= s
+                        gRec(i, -1.0)
+                    else if dir == 1 ? h >= t : l <= t
+                        gRec(i, array.get(GRR, i % 2))
+
+        // Entrée
+        if inWin and ready and not done and not inPos
+            int   d = 0
+            float e = na
+            if gapEntry and j == 0
+                d := open > rHi ? 1 : -1
+                e := open
+            else
+                bool up = h >= rHi
+                bool dn = l <= rLo
+                if up and dn
+                    done  := true
+                    nAmb  += 1
+                    stTxt := "Sauté : 2 côtés cassés même bougie"
+                    stCol := color.orange
+                else if up or dn
+                    d := up ? 1 : -1
+                    e := up ? rHi : rLo
+            if d != 0
+                done := true
+                bool  sideOk = SIDES == "Les deux" or (SIDES == "Achats" and d == 1) or (SIDES == "Ventes" and d == -1)
+                float s0 = subOn ? (SL_REF == "Bougie 1 minute" ? (d == 1 ? l : h) : (d == 1 ? runLo : runHi)) : (d == 1 ? low : high)
+                s0 := s0 - d * SL_BUF
+                if not sideOk
+                    nSide += 1
+                    stTxt := "Sauté : sens exclu"
+                    stCol := color.orange
+                else if (e - s0) * d <= 0
+                    nAmb += 1
+                else
+                    dir    := d
+                    ent    := e
+                    sl     := s0
+                    risk   := math.abs(ent - sl)
+                    tp     := ent + dir * RR * risk
+                    tp1    := ent + dir * TP1_R * risk
+                    tp1Hit := false
+                    rng    := rHi - rLo
+                    entBar := bar_index
+                    entSub := j
+                    inPos  := true
+                    stTxt  := "EN TRADE " + (dir == 1 ? "ACHAT" : "VENTE")
+                    stCol  := dir == 1 ? color.lime : color.red
+                    zTP := box.new(bar_index, math.max(ent, tp), bar_index, math.min(ent, tp), border_color = color.new(C_TP, 60), bgcolor = color.new(C_TP, 82), text = "TP " + fmtP(tp), text_size = size.small, text_color = C_TP, text_halign = text.align_right, text_valign = dir == 1 ? text.align_top : text.align_bottom)
+                    zSL := box.new(bar_index, math.max(ent, sl), bar_index, math.min(ent, sl), border_color = color.new(C_SL, 60), bgcolor = color.new(C_SL, 82), text = "SL " + fmtP(sl), text_size = size.small, text_color = C_SL, text_halign = text.align_right, text_valign = dir == 1 ? text.align_bottom : text.align_top)
+                    if USE_TP1
+                        lTP1 := line.new(bar_index, tp1, bar_index, tp1, color = C_TP, style = line.style_dashed)
+                    alert("LDN BO " + syminfo.ticker + (dir == 1 ? " ACHAT" : " VENTE") + "  entrée " + fmtP(ent) + "  SL " + fmtP(sl) + (USE_TP1 ? "  TP1 " + fmtP(tp1) : "") + "  TP " + fmtP(tp), alert.freq_once_per_bar_close)
+                    if not subOn and STRICT and (dir == 1 ? close < ent : close > ent)
+                        closeR   := -1.0
+                        exitKind := 1
+                    // Grille : sur la bougie d'entrée, SL compté seulement si la clôture est au-delà
+                    for i = 0 to 7
+                        float gk = array.get(K, math.floor(i / 2)) * rng
+                        array.set(gSL, i, ent - dir * gk)
+                        array.set(gTP, i, ent + dir * array.get(GRR, i % 2) * gk)
+                        array.set(gSt, i, 1)
+                        if dir == 1 ? c <= ent - gk : c >= ent + gk
+                            gRec(i, -1.0)
+
+// Alerte temps réel au toucher du niveau
+if barstate.isrealtime and inWin and ready and not done and not inPos
+    if high >= rHi
+        alert("LDN BO " + syminfo.ticker + " : cassure du HIGH London " + fmtP(rHi), alert.freq_once_per_bar)
+    else if low <= rLo
+        alert("LDN BO " + syminfo.ticker + " : cassure du LOW London " + fmtP(rLo), alert.freq_once_per_bar)
+
+// ─────────────────────────── Clôture du trade ───────────────────────────
+if inPos
+    box.set_right(zTP, bar_index)
+    box.set_right(zSL, bar_index)
+    if USE_TP1
+        line.set_x2(lTP1, bar_index)
+
+if not na(closeR)
+    inPos := false
+    array.push(res, closeR)
+    if dir == 1
+        nL   += 1
+        sumL += closeR
+    else
+        nS   += 1
+        sumS += closeR
+    strk    := closeR < 0 ? strk + 1 : 0
+    maxStrk := math.max(maxStrk, strk)
+    sumRisk    += risk
+    sumRiskPct += risk / rng
+    if exitKind == 3
+        nTime += 1
+    if exitKind == 4
+        nBE += 1
+    string txt = (closeR >= 0 ? "+" : "") + str.tostring(closeR, "#.##") + "R" + (exitKind == 3 ? " (temps)" : exitKind == 4 ? " (TP1+BE)" : "")
+    stTxt := "Terminé : " + txt
+    stCol := closeR > 0 ? color.lime : color.red
+    if SHOW_LBL
+        label.new(bar_index, dir == 1 ? high : low, txt, style = dir == 1 ? label.style_label_down : label.style_label_up, color = closeR > 0 ? C_TP : C_SL, textcolor = color.white, size = size.small)
+
+// ─────────────────────────── Tableaux ───────────────────────────
+pos(string s) =>
+    s == "Haut gauche" ? position.top_left : s == "Bas droite" ? position.bottom_right : s == "Bas gauche" ? position.bottom_left : position.top_right
+
+var table tb = table.new(pos(TBL_POS), 2, 20, bgcolor = color.new(color.black, 15), border_width = 1, border_color = color.new(color.gray, 60))
+var table tg = table.new(TBL_POS == "Haut droite" ? position.bottom_right : TBL_POS == "Haut gauche" ? position.bottom_left : TBL_POS == "Bas droite" ? position.top_right : position.top_left, 3, 6, bgcolor = color.new(color.black, 15), border_width = 1, border_color = color.new(color.gray, 60))
+var table tt = table.new(pos(TODAY_POS), 2, 6, bgcolor = color.new(color.black, 10), border_width = 1, border_color = color.new(color.gray, 60))
+
+row(int r, string k, string v, color c) =>
+    table.cell(tb, 0, r, k, text_color = color.silver, text_size = size.small, text_halign = text.align_left)
+    table.cell(tb, 1, r, v, text_color = c, text_size = size.small, text_halign = text.align_right)
+
+trow(int r, string k, string v, color c) =>
+    table.cell(tt, 0, r, k, text_color = color.silver, text_size = size.normal, text_halign = text.align_left)
+    table.cell(tt, 1, r, v, text_color = c, text_size = size.normal, text_halign = text.align_right)
+
+if barstate.islast
+    if SHOW_TODAY and not na(rHi)
+        string live = inPos ? stTxt + " · " + str.tostring((close - ent) / risk * dir, "+#.##;-#.##") + "R" + (tp1Hit ? " (BE)" : "") : stTxt
+        table.cell(tt, 0, 0, "Aujourd'hui · " + syminfo.ticker, text_color = color.white, text_size = size.normal)
+        table.merge_cells(tt, 0, 0, 1, 0)
+        trow(1, "High / Low", fmtP(rHi) + " / " + fmtP(rLo), color.white)
+        trow(2, "Taille", str.tostring(rHi - rLo, "#") + " pts" + (na(rAtr) ? "" : " · " + str.tostring(rAtr, "#.##") + " ATR"), color.white)
+        trow(3, "Prix vs High", str.tostring(close - rHi, "+#.#;-#.#"), close > rHi ? color.lime : color.silver)
+        trow(4, "Prix vs Low", str.tostring(close - rLo, "+#.#;-#.#"), close < rLo ? color.red : color.silver)
+        trow(5, "État", live, stCol)
+    if SHOW_TBL
+        int   n    = array.size(res)
+        int   w    = 0
+        float tot  = 0.0
+        for r in res
+            tot += r
+            if r > 0
+                w += 1
+        float  avg  = n > 0 ? tot / n : na
+        float  wr   = n > 0 ? 100.0 * w / n : na
+        float  beWr = 100.0 / (1 + RR)
+        string mode = (INTRA_ON ? "Intrabar " + LTF + " / SL " + (SL_REF == "Bougie 1 minute" ? "1m" : "bougie " + timeframe.period) : "Bougie " + timeframe.period + (STRICT ? " strict" : "")) + (USE_TP1 ? " / TP1+BE" : "")
+        table.cell(tb, 0, 0, "London BO " + syminfo.ticker + " " + timeframe.period, text_color = color.white, text_size = size.small)
+        table.merge_cells(tb, 0, 0, 1, 0)
+        row(1, "Mode", mode, color.aqua)
+        row(2, "Jours avec range", str.tostring(nDays), color.white)
+        row(3, "Trades", str.tostring(n), color.white)
+        row(4, "Sautés (hors range 9h30)", str.tostring(nGap), color.gray)
+        row(5, "Sautés (filtre range)", str.tostring(nRF), color.gray)
+        row(6, "Pas de cassure", str.tostring(nNoBk), color.gray)
+        row(7, "Ambigus / sens exclu", str.tostring(nAmb) + " / " + str.tostring(nSide), color.gray)
+        row(8, "Win rate (R > 0)", na(wr) ? "-" : str.tostring(wr, "#.#") + " %", na(wr) ? color.white : USE_TP1 ? color.white : wr >= beWr ? color.lime : color.red)
+        row(9, "WR mini rentable", USE_TP1 ? "-" : str.tostring(beWr, "#.#") + " %", color.gray)
+        row(10, "R moyen / trade", na(avg) ? "-" : str.tostring(avg, "+#.###;-#.###"), na(avg) ? color.white : avg > 0 ? color.lime : color.red)
+        row(11, "Total R", str.tostring(tot, "+#.##;-#.##"), tot > 0 ? color.lime : color.red)
+        row(12, "Achats : n / R moy", str.tostring(nL) + " / " + (nL > 0 ? str.tostring(sumL / nL, "+#.##;-#.##") : "-"), color.white)
+        row(13, "Ventes : n / R moy", str.tostring(nS) + " / " + (nS > 0 ? str.tostring(sumS / nS, "+#.##;-#.##") : "-"), color.white)
+        row(14, "Sorties temps / TP1+BE", str.tostring(nTime) + " / " + str.tostring(nBE), color.gray)
+        row(15, "Pire série de pertes", str.tostring(maxStrk), color.orange)
+        row(16, "SL moyen (pts)", n > 0 ? str.tostring(sumRisk / n, "#.##") : "-", color.white)
+        row(17, "SL moyen / range", n > 0 ? str.tostring(100 * sumRiskPct / n, "#") + " %" : "-", color.white)
+        row(18, "Jours sans intrabar", str.tostring(nFb), nFb > 0 ? color.orange : color.gray)
+    if SHOW_GRID
+        table.cell(tg, 0, 0, "SL fixe = k × range", text_color = color.white, text_size = size.small)
+        table.merge_cells(tg, 0, 0, 2, 0)
+        table.cell(tg, 0, 1, "k", text_color = color.silver, text_size = size.small)
+        table.cell(tg, 1, 1, "TP 2R", text_color = color.silver, text_size = size.small)
+        table.cell(tg, 2, 1, "TP 3R", text_color = color.silver, text_size = size.small)
+        for j = 0 to 3
+            table.cell(tg, 0, j + 2, str.tostring(array.get(K, j), "#.##"), text_color = color.silver, text_size = size.small)
+            for c = 0 to 1
+                int   i  = j * 2 + c
+                float gn = array.get(gN, i)
+                float ga = gn > 0 ? array.get(gSum, i) / gn : na
+                string tx = gn > 0 ? str.tostring(ga, "+#.##;-#.##") + "R  " + str.tostring(100 * array.get(gW, i) / gn, "#") + "%  n" + str.tostring(gn, "#") : "-"
+                table.cell(tg, c + 1, j + 2, tx, text_color = na(ga) ? color.gray : ga > 0 ? color.lime : color.red, text_size = size.small)
